@@ -1,0 +1,97 @@
+/**
+ * Logger_test_fixed.js
+ * -------------------------------------------------------------------
+ * mJS-kompatible Korrektur von Logger.test.js.
+ *
+ * Geänderte Punkte gegenüber dem Original:
+ *  - var  -> let                 (mJS unterstützt nur "let")
+ *  - new Logger(...)  -> Object.create(loggerProto) + init()
+ *                                 (mJS kennt kein "new")
+ *  - new Date().toISOString()  -> Shelly.getComponentStatus("sys").unixtime
+ *                                 (mJS kennt kein Date-Objekt)
+ *  - level(v).toUpperCase()  entfernt -> Level-Strings müssen exakt
+ *    "DEBUG"/"INFO"/"WARN"/"ERROR"/"FATAL" übergeben werden.
+ *    Grund: .toUpperCase() ist in Shellys mJS-String-API nicht
+ *    dokumentiert (nur length/at/indexOf/slice/[] sind garantiert).
+ * -------------------------------------------------------------------
+ */
+
+let LEVELS = { DEBUG: 10, INFO: 20, WARN: 30, ERROR: 40, FATAL: 50 };
+let NAMES = { 10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "FATAL" };
+
+function level(v) {
+  if (typeof v === "number") return NAMES[v] ? v : 20;
+  return LEVELS[v] || 20; // Erwartet bereits Großbuchstaben, z.B. "INFO"
+}
+
+function json(v) {
+  if (v === undefined) return "";
+  if (v === null) return "null";
+  let s = JSON.stringify(v);
+  return s === undefined ? "[Unserializable]" : s;
+}
+
+function tsPrefix() {
+  let sys = Shelly.getComponentStatus("sys");
+  let t = sys ? sys.unixtime : 0;
+  return "[" + t + "]"; // Unix-Timestamp statt ISO-Datum (kein Date-Objekt in mJS)
+}
+
+// Prototyp-Objekt statt Klasse - Instanziierung über Object.create()
+let loggerProto = {
+  init: function (o) {
+    o = o || {};
+    this.context = o.context || "";
+    this.minLevel = level(o.minLevel || "INFO");
+    return this;
+  },
+  log: function (l, m, d, c) {
+    let n = level(l);
+    if (n < this.minLevel) return false;
+    let s = tsPrefix() + " [" + NAMES[n] + "] ";
+    if (this.context) s += "[" + this.context + "] ";
+    if (c) s += "[" + c + "] ";
+    s += typeof m === "string" ? m : json(m);
+    if (d !== undefined) s += " " + json(d);
+    print(s);
+    return true;
+  },
+  debug: function (m, d, c) { return this.log("DEBUG", m, d, c); },
+  info: function (m, d, c) { return this.log("INFO", m, d, c); },
+  warn: function (m, d, c) { return this.log("WARN", m, d, c); },
+  error: function (m, d, c) { return this.log("ERROR", m, d, c); },
+  fatal: function (m, d, c) { return this.log("FATAL", m, d, c); }
+};
+
+function createLogger(o) {
+  return Object.create(loggerProto).init(o);
+}
+
+// ---------------------------------------------------------------------
+// Test
+// ---------------------------------------------------------------------
+let passed = 0;
+let failed = 0;
+
+function test(n, c) {
+  if (c) { passed = passed + 1; print("PASS: " + n); }
+  else { failed = failed + 1; print("FAIL: " + n); }
+}
+
+print("SWC Build 0004.1 - Standalone Logger 2.0 test (mJS-fixed)");
+print("Runtime: Shelly Script");
+print("-----------------------------------------------");
+
+test("Shelly runtime detected", typeof Shelly !== "undefined");
+
+let logger = createLogger({ context: "TEST", minLevel: "INFO" });
+
+test("DEBUG filtered", logger.debug("hidden") === false);
+test("INFO accepted", logger.info("info", undefined, "T-001") === true);
+test("WARN accepted", logger.warn("warn", undefined, "T-002") === true);
+test("ERROR accepted", logger.error("error", undefined, "T-003") === true);
+test("FATAL accepted", logger.fatal("fatal", undefined, "T-004") === true);
+
+print("-----------------------------------------------");
+print("RESULT: " + passed + " passed, " + failed + " failed");
+print(failed === 0 ? "BUILD 0004.1 LOGGER TEST: PASS" : "BUILD 0004.1 LOGGER TEST: FAIL");
