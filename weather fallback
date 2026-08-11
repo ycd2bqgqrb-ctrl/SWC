@@ -1,0 +1,123 @@
+/**
+ * weather_fallback.js
+ * -------------------------------------------------------------------
+ * Teil des lokalen "Weather Controller" Projekts.
+ *
+ * Aufgabe: Prüft periodisch, ob die WS90 aktuell Daten liefert
+ * (Freshness-Check über einen KVS-Timestamp). Wenn die WS90-Daten
+ * älter als staleThresholdSec sind (oder noch nie geschrieben wurden),
+ * wird als Redundanz eine Internet-Wetter-API abgefragt (Open-Meteo,
+ * kein API-Key nötig, kostenlos) und das Ergebnis in dieselben KVS-Keys
+ * geschrieben wie die WS90-Werte. So muss deine Rollo-/Fenster-
+ * Steuerungslogik die Quelle der Daten nicht kennen - sie liest immer
+ * nur KEYS.windSpeed / KEYS.rain / KEYS.temp.
+ *
+ * WICHTIGE ANNAHME: Dein WS90-Ingestion-Script muss bei jedem
+ * empfangenen BTHome-Paket KEYS.lastUpdate (Unix-Timestamp) sowie
+ * KEYS.source = "ws90" aktualisieren. Falls deine Keys im Repo anders
+ * heißen, einfach im KEYS-Objekt unten anpassen.
+ *
+ * Läuft auf jedem Gen2+ Shelly mit Scripting-Unterstützung (getestet
+ * gedacht für Shelly 2PM Gen3 / Shelly 1 Gen4 / Shelly 1 Gen3 - bei
+ * Gen3-Geräten ggf. prüfen, ob Scripting im Web-UI verfügbar ist).
+ * -------------------------------------------------------------------
+ */
+
+// ---------------------------------------------------------------------
+// Konfiguration - hier anpassen
+// ---------------------------------------------------------------------
+let CFG = {
+  latitude: 47.2,           // TODO: eigene Koordinaten eintragen
+  longitude: 8.67,          // TODO: eigene Koordinaten eintragen
+  staleThresholdSec: 900,   // WS90-Daten älter als 15 Min. -> Fallback
+  checkIntervalMs: 120000,  // alle 2 Minuten auf Frische prüfen
+  kvsPrefix: "wc_"          // gemeinsamer Key-Präfix für den Weather Controller
+};
+
+// Gemeinsame Keys, die auch das WS90-Ingestion-Script verwenden muss.
+let KEYS = {
+  windSpeed: CFG.kvsPrefix + "wind_speed",     // m/s
+  rain: CFG.kvsPrefix + "rain",                // bool
+  temp: CFG.kvsPrefix + "temp",                // °C
+  source: CFG.kvsPrefix + "source",            // "ws90" | "fallback"
+  lastUpdate: CFG.kvsPrefix + "last_update",   // Unix-Timestamp (s), von WS90-Script gepflegt
+  fallbackUpdate: CFG.kvsPrefix + "fallback_update"
+};
+
+let failCount = 0;
+
+// ---------------------------------------------------------------------
+// Hilfsfunktionen
+// ---------------------------------------------------------------------
+function nowTs() {
+  let sys = Shelly.getComponentStatus("sys");
+  return sys ? sys.unixtime : 0;
+}
+
+function kvsSet(key, value) {
+  Shelly.call("KVS.Set", { key: key, value: value }, null);
+}
+
+function kvsGetLastUpdate() {
+  Shelly.call("KVS.Get", { key: KEYS.lastUpdate }, onLastUpdateResult);
+}
+
+// ---------------------------------------------------------------------
+// Internet-Fallback (Open-Meteo, kein API-Key nötig)
+// ---------------------------------------------------------------------
+function fetchInternetWeather() {
+  let url = "https://api.open-meteo.com/v1/forecast?latitude=" + CFG.latitude +
+    "&longitude=" + CFG.longitude +
+    "&current=temperature_2m,precipitation,wind_speed_10m";
+
+  Shelly.call("HTTP.GET", { url: url, timeout: 8 }, onWeatherHttpResult);
+}
+
+function onWeatherHttpResult(resp, error_code, error_message) {
+  if (error_code !== 0 || !resp || resp.code !== 200) {
+    failCount = failCount + 1;
+    print("[WeatherFallback] HTTP-Fehler (Versuch ", failCount, "):", error_code, error_message);
+    return;
+  }
+
+  let data = JSON.parse(resp.body);
+  if (!data || !data.current) {
+    print("[WeatherFallback] Unerwartete Antwort von Open-Meteo");
+    return;
+  }
+
+  let ts = nowTs();
+  kvsSet(KEYS.windSpeed, data.current.wind_speed_10m);
+  kvsSet(KEYS.rain, data.current.precipitation > 0);
+  kvsSet(KEYS.temp, data.current.temperature_2m);
+  kvsSet(KEYS.source, "fallback");
+  kvsSet(KEYS.lastUpdate, ts);
+  kvsSet(KEYS.fallbackUpdate, ts);
+
+  failCount = 0;
+  print("[WeatherFallback] Fallback aktiv: wind=", data.current.wind_speed_10m,
+    "m/s temp=", data.current.temperature_2m, "C regen=", data.current.precipitation, "mm");
+}
+
+// ---------------------------------------------------------------------
+// Freshness-Check
+// ---------------------------------------------------------------------
+function onLastUpdateResult(result, error_code, error_message) {
+  let lastUpdate = (result && typeof result.value === "number") ? result.value : 0;
+  let age = nowTs() - lastUpdate;
+
+  if (lastUpdate === 0 || age > CFG.staleThresholdSec) {
+    print("[WeatherFallback] WS90-Daten sind ", age, "s alt -> hole Internet-Wetter");
+    fetchInternetWeather();
+  }
+}
+
+function checkFreshness() {
+  kvsGetLastUpdate();
+}
+
+// ---------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------
+Timer.set(CFG.checkIntervalMs, true, checkFreshness);
+checkFreshness(); // sofort einmal beim Start prüfen
